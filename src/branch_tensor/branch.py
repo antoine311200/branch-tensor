@@ -2,10 +2,22 @@ from __future__ import annotations
 
 import torch
 from opt_einsum import contract
+from copy import deepcopy
 
 from typing import Union
 
 class BranchTensor:
+    """Decomposition of tensor into a hierarchical tensor train decomposition.
+    
+    The main branches of the tensor tree stored as a binary tree represent decomposition of the tensor with
+    decreasing level of information. Hence, the top branch (as in a depth-first search) represents a tensor train
+    of given tt-ranks.
+    
+    Args:
+        input_shape (tuple): The shape of the input tensor
+        output_shape (tuple): The shape of the output tensor
+        ranks (tuple): The tt-ranks of the tensor train decomposition
+    """
 
     def __init__(self, input_shape, output_shape, ranks):
         self.input_shape = input_shape
@@ -111,8 +123,14 @@ class BranchTensor:
             return contract(*left_einsum).squeeze() + contract(*right_einsum).squeeze()
 
         return branch_recompose(self.branches)
+    
+    def clone(self):
+        """Return a deep copy of the BranchTensor"""
+        new_tensor = BranchTensor(self.input_shape, self.output_shape, self.ranks)
+        new_tensor.branches = deepcopy(self.branches)
+        return new_tensor
 
-    def prune(self, level):
+    def prune(self, level, inplace=True):
         def prune(tree, level):
             if tree is None or tree == (None, None):
                 return None
@@ -125,19 +143,45 @@ class BranchTensor:
 
             return [(core_major, prune(branches_major, level)), (core_minor, prune(branches_minor, level - 1))]
         
-        self.branches = prune(self.branches, level)
+        if inplace:
+            self.branches = prune(self.branches, level)
+            return self
+        else:
+            new_tensor = self.clone()
+            new_tensor.branches = prune(new_tensor.branches, level)
+            return new_tensor
+        
+
+    def numel(self):
+        """Return the number of elements in the tensor"""
+        def count(tree):
+            if tree is None or tree == (None, None):
+                return 0
+            
+            if tree[0][0] is not None and tree[0][1] is None:
+                return tree[0][0].numel()
+            
+            core_major, branches_major = tree[0]
+            core_minor, branches_minor = tree[1]
+
+            return count(branches_major) + count(branches_minor) + core_major.numel() + (core_minor.numel() if core_minor is not None else 0)
+            
+
+        return count(self.branches)
     
     def __repr__(self) -> str:
         repr_str = f"BranchTensor(input_shape={self.input_shape}, output_shape={self.output_shape}, ranks={self.ranks})"
     
         def print_tree(tree, indent=0):
             if tree is None or tree == (None, None):
-                return""
+                return ""
+            repr = ""
             for core, branches in tree:
                 if core is None:
                     continue
 
-                return " " * indent+"↪" + core.shape + "\n" + print_tree(branches, indent + 3)
+                repr += " " * indent+"↪ " + str(core.shape) + "\n" + print_tree(branches, indent + 3)
+            return repr
         
         return repr_str+"\n"+print_tree(self.branches)
 
